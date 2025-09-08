@@ -252,10 +252,26 @@ class SmppClient(SmppConfig):
     def is_connected(self) -> bool:
         """Check if client is connected"""
         with self._lock:
-            return (self._connected and 
-                    self.conn is not None and
-                    hasattr(self.conn, 'state') and
-                    self.conn.state == 'BOUND_TRX')
+            # Check if we think we're connected
+            if not self._connected or self.conn is None:
+                return False
+
+            # Check if the connection state is what we expect
+            if not (hasattr(self.conn, 'state') and self.conn.state == 'BOUND_TRX'):
+                return False
+
+            # Try to validate the socket connection
+            try:
+                if hasattr(self.conn, 'socket') and self.conn.socket is not None:
+                    # Send a simple enquire_link to test connection
+                    self.conn.send_pdu(smpplib.command.EnquireLink())
+                    return True
+                else:
+                    return False
+            except Exception:
+                # If we can't send an enquire_link, we're probably disconnected
+                self._connected = False
+                return False
 
     def handle_message(self, pdu):
         """Handle incoming messages"""

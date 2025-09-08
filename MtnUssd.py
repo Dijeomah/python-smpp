@@ -71,8 +71,6 @@ class MtnUssd(SmppConfig):
             # Make sure the client knows to stop as well
             if self.client_instance:
                 self.client_instance._should_run = False
-            # Don't call sys.exit here, let the main loop handle the exit naturally
-            # This prevents multiple signal handlers from interfering with each other
 
         # Handle SIGINT (Ctrl+C) and SIGTERM
         signal.signal(signal.SIGINT, signal_handler)
@@ -103,7 +101,7 @@ class MtnUssd(SmppConfig):
                     if not self.retry:
                         break
 
-                    # Check if client is still connected
+                    # Check if client is still connected using improved logic
                     if self.client_instance and not self.client_instance.is_connected():
                         self._logger.warning("SMPP client disconnected, attempting to reconnect...")
 
@@ -133,6 +131,9 @@ class MtnUssd(SmppConfig):
                             if connection_attempts >= max_connection_attempts:
                                 self._logger.error("Maximum reconnection attempts reached. Exiting.")
                                 self.retry = False
+                    else:
+                        # Connection is good, reset connection attempts counter
+                        connection_attempts = 0
 
                 except KeyboardInterrupt:
                     self._logger.info("Keyboard interrupt received, shutting down...")
@@ -152,8 +153,6 @@ class MtnUssd(SmppConfig):
             # Ensure cleanup
             self.stop_client()
             print("MTN USSD service stopped.")
-            # Explicitly exit the application
-            sys.exit(0)
 
 
 def main():
