@@ -124,7 +124,7 @@ class Response(SmppConfig):
         default_response = "System Error. Please try again later. Thanks"
 
         try:
-            with urllib.request.urlopen(url, timeout=30) as response:
+            with urllib.request.urlopen(url, timeout=10) as response:
                 response_data = response.read().decode('utf-8')
                 print(f"url call response::{response_data}")
                 return response_data.strip() if response_data else default_response
