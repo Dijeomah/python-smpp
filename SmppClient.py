@@ -9,26 +9,8 @@ import smpplib.command
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
 
-# Alternative: Use a function to patch the params if needed
-def patch_deliver_sm_if_needed():
-    """Safely patch DeliverSM params if USSD service op constant exists"""
-    if (hasattr(smpplib.command, 'DeliverSM') and
-            hasattr(smpplib.consts, 'TAG_USSD_SERVICE_OP') and
-            hasattr(smpplib.command.DeliverSM, 'params') and
-            isinstance(smpplib.command.DeliverSM.params, dict)):
-
-        # Use bytes instead of OctetString
-        smpplib.command.DeliverSM.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
-            'name': 'ussd_service_op',
-            'type': bytes,
-        }
-        logging.getLogger(__name__).info("Successfully patched DeliverSM for USSD support")
-    else:
-        logging.getLogger(__name__).warning("Could not patch DeliverSM - required attributes not found")
-
-# Apply the patch
-patch_deliver_sm_if_needed()
-
+# NO MONKEY PATCHING - this might be the simplest solution
+# If USSD functionality is not required, don't patch
 
 class SmppClient(SmppConfig):
     """SMPP Client implementation using smpplib"""
@@ -49,7 +31,16 @@ class SmppClient(SmppConfig):
     def connect_gateway(self):
         """Connect to SMPP gateway"""
         self.conn = smpplib.client.Client(self.server_ip, self.server_port)
-        self.conn.set_message_received_handler(self.handle_message)
+
+        # Use a wrapper to handle parsing errors
+        def safe_handle_message(pdu):
+            try:
+                self.handle_message(pdu)
+            except Exception as e:
+                self.logger.error(f"Error in message handler: {e}")
+                # Continue listening despite errors
+
+        self.conn.set_message_received_handler(safe_handle_message)
 
         self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
                          f"systemType: {self.system_type} servicetype: {self.service_type}")
@@ -62,7 +53,7 @@ class SmppClient(SmppConfig):
                 system_type=self.system_type,
             )
             self._listen_thread = threading.Thread(target=self.conn.listen)
-            self._listen_thread.daemon = True  # Make it a daemon thread
+            self._listen_thread.daemon = True
             self._listen_thread.start()
         except Exception as e:
             self.logger.error(f"Connection failed: {e}")
@@ -83,7 +74,6 @@ class SmppClient(SmppConfig):
 
     def is_connected(self) -> bool:
         """Check if client is connected"""
-        # In smpplib 2.2.4, check the state string directly
         return (self.conn is not None and
                 hasattr(self.conn, 'state') and
                 self.conn.state == 'BOUND_TRX')
