@@ -58,6 +58,7 @@ class Response(SmppConfig):
                 menu_response = self.http_request(call_url)
                 # self.send_submit_sm(smpp_client, menu_response, self.service_code,
                 #                         msisdn, session_id)
+                print(f"menu_response: {menu_response}")
                 self.logger.info(f"menu_response: {menu_response}")
 
                 # Only try to send if we're still connected

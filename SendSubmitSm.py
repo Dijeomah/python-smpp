@@ -45,6 +45,7 @@ class SendSubmitSm(SmppConfig):
 
                 # Make HTTP request to process the USSD
                 menu_response = self.http_request(call_url)
+                print(f"menu_response: {menu_response}")
                 self.logger.info(f"menu_response: {menu_response}")
 
                 # Send response back via SMPP
