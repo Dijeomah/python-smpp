@@ -1,3 +1,4 @@
+# MtnUssd.py
 import time
 import logging
 import signal
@@ -37,8 +38,11 @@ class MtnUssd(SmppConfig):
         try:
             if self.client_instance:
                 self._logger.info("Starting SMPP client...")
-                self.client_instance.connect_gateway()
-                self._logger.info("SMPP client started successfully")
+                success = self.client_instance.connect_gateway()
+                if success:
+                    self._logger.info("SMPP client started successfully")
+                else:
+                    raise RuntimeError("SMPP client failed to connect")
             else:
                 raise RuntimeError("SMPP client instance is not initialized")
         except Exception as e:
@@ -81,6 +85,9 @@ class MtnUssd(SmppConfig):
             print("MTN USSD service is running. Press Ctrl+C to stop.")
 
             # Main loop - equivalent to the infinite while loop in Java
+            connection_attempts = 0
+            max_connection_attempts = 5
+
             while self.retry:
                 try:
                     time.sleep(1.0)  # Sleep for 1 second (equivalent to Thread.sleep(1000L))
@@ -88,11 +95,29 @@ class MtnUssd(SmppConfig):
                     # Check if client is still connected
                     if self.client_instance and not self.client_instance.is_connected():
                         self._logger.warning("SMPP client disconnected, attempting to reconnect...")
+
+                        # Exponential backoff for reconnection attempts
+                        backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
+                        self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
+                        time.sleep(backoff_time)
+
                         try:
-                            self.client_instance.connect_gateway()
+                            success = self.client_instance.connect_gateway()
+                            if success:
+                                connection_attempts = 0  # Reset on successful connection
+                                self._logger.info("Reconnection successful")
+                            else:
+                                connection_attempts += 1
+                                self._logger.error(f"Reconnection attempt {connection_attempts} failed")
+                                if connection_attempts >= max_connection_attempts:
+                                    self._logger.error("Maximum reconnection attempts reached. Exiting.")
+                                    self.retry = False
                         except Exception as reconnect_error:
+                            connection_attempts += 1
                             self._logger.error(f"Reconnection failed: {reconnect_error}")
-                            time.sleep(5.0)  # Wait before next attempt
+                            if connection_attempts >= max_connection_attempts:
+                                self._logger.error("Maximum reconnection attempts reached. Exiting.")
+                                self.retry = False
 
                 except KeyboardInterrupt:
                     self._logger.info("Keyboard interrupt received, shutting down...")

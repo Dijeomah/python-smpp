@@ -1,3 +1,4 @@
+# Response.py
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -48,8 +49,12 @@ class Response(SmppConfig):
 
                 menu_response = self.http_request(call_url)
 
-                self.send_submit_sm(smpp_client, menu_response, self.service_code,
-                                    msisdn, session_id)
+                # Only try to send if we're still connected
+                if smpp_client.is_connected():
+                    self.send_submit_sm(smpp_client, menu_response, self.service_code,
+                                        msisdn, session_id)
+                else:
+                    self.logger.warning("Cannot send response - SMPP client is not connected")
 
         except Exception as e:
             self.logger.error(f"Error processing DeliverSM request: {e}", exc_info=True)

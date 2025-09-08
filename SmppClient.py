@@ -1,3 +1,4 @@
+# SmppClient.py
 import logging
 import threading
 import struct
@@ -88,11 +89,11 @@ def patch_parse_optional_params():
         logging.info(f"Patched {cls.__name__} to handle unknown optional parameters.")
 
 # Apply the generic patch
-# try:
-#     patch_parse_optional_params()
-#     logging.info("Optional parameter parsing patching completed")
-# except Exception as e:
-#     logging.warning(f"Failed to patch optional parameter parsing: {e}")
+try:
+    patch_parse_optional_params()
+    logging.info("Optional parameter parsing patching completed")
+except Exception as e:
+    logging.warning(f"Failed to patch optional parameter parsing: {e}")
 
 
 class SmppClient(SmppConfig):
@@ -110,57 +111,98 @@ class SmppClient(SmppConfig):
         self.logger = logging.getLogger(__name__)
         self.executor_service = ThreadPoolExecutor(max_workers=self.number_of_threads)
         self._listen_thread = None
+        self._connected = False
+        self._lock = threading.Lock()
 
     def connect_gateway(self):
         """Connect to SMPP gateway"""
-        self.conn = smpplib.client.Client(self.server_ip, self.server_port)
+        with self._lock:
+            # Close existing connection if any
+            if self.conn:
+                try:
+                    self.conn.unbind()
+                except:
+                    pass
+                try:
+                    self.conn.disconnect()
+                except:
+                    pass
+                self.conn = None
 
-        # Use a safe message handler wrapper
-        def safe_handle_message(pdu):
+            self.conn = smpplib.client.Client(self.server_ip, self.server_port)
+
+            # Use a safe message handler wrapper
+            def safe_handle_message(pdu):
+                try:
+                    self.handle_message(pdu)
+                except Exception as e:
+                    self.logger.error(f"Error in message handler: {e}")
+
+            self.conn.set_message_received_handler(safe_handle_message)
+
+            self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
+                             f"systemType: {self.system_type} servicetype: {self.service_type}")
+
             try:
-                self.handle_message(pdu)
+                self.conn.connect()
+                resp = self.conn.bind_transceiver(
+                    system_id=self.account,
+                    password=self.password,
+                    system_type=self.system_type,
+                )
+                self.logger.debug(f"Bind response: {resp}")
+                
+                self._connected = True
+                
+                self._listen_thread = threading.Thread(target=self._listen)
+                self._listen_thread.daemon = True
+                self._listen_thread.start()
+                self.logger.info("SMPP connection established successfully")
+                return True
             except Exception as e:
-                self.logger.error(f"Error in message handler: {e}")
+                self._connected = False
+                self.logger.error(f"Connection failed: {e}")
+                raise
 
-        self.conn.set_message_received_handler(safe_handle_message)
-
-        self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
-                         f"systemType: {self.system_type} servicetype: {self.service_type}")
-
+    def _listen(self):
+        """Listen for incoming messages with proper error handling"""
         try:
-            self.conn.connect()
-            self.conn.bind_transceiver(
-                system_id=self.account,
-                password=self.password,
-                system_type=self.system_type,
-            )
-            self._listen_thread = threading.Thread(target=self.conn.listen)
-            self._listen_thread.daemon = True
-            self._listen_thread.start()
-            self.logger.info("SMPP connection established successfully")
+            while self._connected and self.conn:
+                try:
+                    self.conn.listen()
+                except Exception as e:
+                    if self._connected:  # Only log if we're supposed to be connected
+                        self.logger.warning(f"Connection error in listen loop: {e}")
+                        self._connected = False
+                        break
         except Exception as e:
-            self.logger.error(f"Connection failed: {e}")
-            raise
+            self.logger.error(f"Error in listen thread: {e}")
 
     def disconnect(self):
         """Disconnect from SMPP gateway"""
-        if self.conn:
-            try:
-                self.conn.unbind()
-                self.conn.disconnect()
-                self.logger.info("SMPP connection disconnected successfully")
-            except Exception as e:
-                self.logger.error(f"Error while disconnecting: {e}")
-            finally:
-                self.conn = None
-        if self.executor_service:
-            self.executor_service.shutdown(wait=False)
+        with self._lock:
+            self._connected = False
+            if self.conn:
+                try:
+                    # Only unbind if we're actually bound
+                    if hasattr(self.conn, 'state') and self.conn.state in ['BOUND_TRX', 'BOUND_TX', 'BOUND_RX']:
+                        self.conn.unbind()
+                    self.conn.disconnect()
+                    self.logger.info("SMPP connection disconnected successfully")
+                except Exception as e:
+                    self.logger.error(f"Error while disconnecting: {e}")
+                finally:
+                    self.conn = None
+            if self.executor_service:
+                self.executor_service.shutdown(wait=False)
 
     def is_connected(self) -> bool:
         """Check if client is connected"""
-        return (self.conn is not None and
-                hasattr(self.conn, 'state') and
-                self.conn.state == 'BOUND_TRX')
+        with self._lock:
+            return (self._connected and 
+                    self.conn is not None and
+                    hasattr(self.conn, 'state') and
+                    self.conn.state == 'BOUND_TRX')
 
     def handle_message(self, pdu):
         """Handle incoming messages"""
@@ -182,10 +224,14 @@ class SmppClient(SmppConfig):
 
     def submit_short_message(self, **kwargs):
         """Submit a short message."""
-        if not self.is_connected():
-            raise Exception("Session not connected")
-        try:
-            return self.conn.send_message(**kwargs)
-        except Exception as e:
-            self.logger.error(f"Error submitting message: {e}")
-            raise
+        with self._lock:
+            if not self.is_connected():
+                raise Exception("Session not connected")
+            try:
+                return self.conn.send_message(**kwargs)
+            except Exception as e:
+                self.logger.error(f"Error submitting message: {e}")
+                # Mark as disconnected if it's a connection error
+                if "Connection reset" in str(e) or "not connected" in str(e).lower():
+                    self._connected = False
+                raise
