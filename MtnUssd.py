@@ -74,42 +74,28 @@ class MtnUssd(SmppConfig):
     def run(self) -> None:
         """Main application loop"""
         try:
-            # Start the SMPP client
             self.start_client()
-
             self._logger.info("MTN USSD service is running. Press Ctrl+C to stop.")
             print("MTN USSD service is running. Press Ctrl+C to stop.")
 
-            # Main loop - equivalent to the infinite while loop in Java
             while self.retry:
-                try:
-                    time.sleep(1.0)  # Sleep for 1 second (equivalent to Thread.sleep(1000L))
+                if not (self.client_instance and self.client_instance.is_connected()):
+                    self._logger.warning("SMPP client disconnected. Attempting to reconnect in 5 seconds...")
+                    self.stop_client()
+                    time.sleep(5)
 
-                    # Check if client is still connected
-                    if self.client_instance and not self.client_instance.is_connected():
-                        self._logger.warning("SMPP client disconnected, attempting to reconnect...")
-                        try:
-                            self.client_instance.connect_gateway()
-                        except Exception as reconnect_error:
-                            self._logger.error(f"Reconnection failed: {reconnect_error}")
-                            time.sleep(5.0)  # Wait before next attempt
-
-                except KeyboardInterrupt:
-                    self._logger.info("Keyboard interrupt received, shutting down...")
-                    self.retry = False
-                    break
-                except Exception as e:
-                    self._logger.error(f"Error in main loop: {e}")
                     if not self.retry:
                         break
-                    # Continue the loop on error
-                    time.sleep(5.0)  # Wait a bit before retrying
+
+                    self._logger.info("Re-initializing client for reconnection.")
+                    self.client_instance = SmppClient(self)
+                    self.start_client()
+                
+                time.sleep(1)
 
         except Exception as e:
             self._logger.error(f"Fatal error in main application: {e}", exc_info=True)
-            raise
         finally:
-            # Ensure cleanup
             self.stop_client()
             print("MTN USSD service stopped.")
 
