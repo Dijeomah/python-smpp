@@ -6,16 +6,25 @@ import smpplib.client
 import smpplib.consts
 import smpplib.gsm
 import smpplib.command
-from smpplib.pdu import OctetString
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
 
-# Monkey-patching for ussd_service_op issue
+# Custom DeliverSM handler for USSD support
+class CustomDeliverSM(smpplib.command.DeliverSM):
+    """Custom DeliverSM with USSD support"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add USSD parameter if the constant exists
+        if hasattr(smpplib.consts, 'TAG_USSD_SERVICE_OP'):
+            self.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
+                'name': 'ussd_service_op',
+                'type': bytes,  # Use bytes instead of OctetString
+            }
+
+# Replace the DeliverSM class if needed
 if hasattr(smpplib.command, 'DeliverSM'):
-    smpplib.command.DeliverSM.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
-        'name': 'ussd_service_op',
-        'type': OctetString,
-    }
+    smpplib.command.DeliverSM = CustomDeliverSM
 
 
 class SmppClient(SmppConfig):
