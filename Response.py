@@ -22,9 +22,12 @@ class Response(SmppConfig):
 
             if payload.strip():
                 session_id = "0"  # Default session ID
-                if pdu.optional_parameters:
+                if hasattr(pdu, 'optional_parameters') and pdu.optional_parameters:
                     for tag, value in pdu.optional_parameters.items():
-                        if tag == 'its_session_info':
+                        # Check for session info in different possible tag formats
+                        if (tag == 'its_session_info' or
+                                (hasattr(smpplib.consts, 'TAG_ITS_SESSION_INFO') and tag == smpplib.consts.TAG_ITS_SESSION_INFO) or
+                                (hasattr(smpplib.consts, 'Tag') and hasattr(smpplib.consts.Tag, 'its_session_info') and tag == smpplib.consts.Tag.its_session_info)):
                             session_id = str(value.decode())
 
                 self.logger.info(f"MSISDN: {msisdn} INPUT: {payload} "
@@ -47,17 +50,46 @@ class Response(SmppConfig):
                        session_id: str):
         """Send USSD response message via SMPP"""
         try:
-            optional_parameters = []
+            optional_parameters = {}
+
+            # Handle session info - check for different constant names
             if session_id != "0":
-                optional_parameters.append(smpplib.consts.TLV(smpplib.consts.Tag.its_session_info, session_id.encode()))
+                session_tag = None
+                # Check various possible tag names
+                if hasattr(smpplib.consts, 'TAG_ITS_SESSION_INFO'):
+                    session_tag = smpplib.consts.TAG_ITS_SESSION_INFO
+                elif hasattr(smpplib.consts, 'Tag') and hasattr(smpplib.consts.Tag, 'its_session_info'):
+                    session_tag = smpplib.consts.Tag.its_session_info
+                elif hasattr(smpplib.consts, 'its_session_info'):
+                    session_tag = smpplib.consts.its_session_info
+
+                if session_tag:
+                    optional_parameters[session_tag] = session_id.encode()
 
             end_session = message[:3].upper() if len(message) >= 3 else ""
 
+            # Handle USSD service op - check for different constant names
+            ussd_op_value = b'\x11' if end_session == "END" else b'\x02'
+
+            ussd_tag = None
+            # Check various possible tag names for USSD service op
+            if hasattr(smpplib.consts, 'TAG_USSD_SERVICE_OP'):
+                ussd_tag = smpplib.consts.TAG_USSD_SERVICE_OP
+            elif hasattr(smpplib.consts, 'Tag') and hasattr(smpplib.consts.Tag, 'ussd_service_op'):
+                ussd_tag = smpplib.consts.Tag.ussd_service_op
+            elif hasattr(smpplib.consts, 'ussd_service_op'):
+                ussd_tag = smpplib.consts.ussd_service_op
+
+            if ussd_tag:
+                optional_parameters[ussd_tag] = ussd_op_value
+
             if end_session == "END":
-                optional_parameters.append(smpplib.consts.TLV(smpplib.consts.Tag.ussd_service_op, b'\x11'))
                 message = message[3:].strip()
-            else:
-                optional_parameters.append(smpplib.consts.TLV(smpplib.consts.Tag.ussd_service_op, b'\x02'))
+
+            # Convert optional_parameters dict to list of TLV tuples if needed
+            optional_params_list = []
+            for tag, value in optional_parameters.items():
+                optional_params_list.append((tag, value))
 
             smpp_client.submit_short_message(
                 source_addr=source,
@@ -69,7 +101,7 @@ class Response(SmppConfig):
                 dest_addr_ton=smpplib.consts.SMPP_TON_INTL,
                 dest_addr_npi=smpplib.consts.SMPP_NPI_ISDN,
                 data_coding=smpplib.consts.SMPP_ENCODING_DEFAULT,
-                optional_parameters=optional_parameters,
+                optional_parameters=optional_params_list or None,
             )
 
             self.logger.info("Message submitted successfully")
