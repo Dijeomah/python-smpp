@@ -5,8 +5,17 @@ from typing import Optional
 import smpplib.client
 import smpplib.consts
 import smpplib.gsm
+import smpplib.command
+import smpplib.pdu
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
+
+# Monkey-patching for ussd_service_op issue
+if hasattr(smpplib.command, 'DeliverSM'):
+    smpplib.command.DeliverSM.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
+        'name': 'ussd_service_op',
+        'type': smpplib.pdu.OctetString,
+    }
 
 
 class SmppClient(SmppConfig):
