@@ -30,7 +30,8 @@ def patch_parse_optional_params():
                     logging.warning(f"Invalid length for optional parameter with tag {field}. Skipping.")
                     break
 
-                if field in self.params:
+                # Check if this field is in our params
+                if hasattr(self, 'params') and field in self.params:
                     param = self.params[field]
                     value = data[value_start:value_end]
                     param_name = param.get('name')
@@ -46,23 +47,53 @@ def patch_parse_optional_params():
                         else:
                             setattr(self, param_name, param_type(value))
                 else:
-                    logging.warning(f"Unrecognized optional parameter with tag {field}. Ignoring.")
+                    # Unknown parameter, skip it but don't crash
+                    logging.debug(f"Unrecognized optional parameter with tag {field}. Skipping.")
 
                 pos = value_end
 
             except struct.error as e:
                 logging.error(f"Error unpacking optional parameter: {e}. Remaining data: {data[pos:]}")
                 break
+            except Exception as e:
+                logging.error(f"Unexpected error processing optional parameter: {e}")
+                break
 
-    # Patch all PDU classes in smpplib.command
+    # Patch specific command classes that have parse_optional_params
+    classes_to_patch = []
+
+    # Look for classes in smpplib.command that might need patching
     for name in dir(smpplib.command):
         attr = getattr(smpplib.command, name)
-        if isinstance(attr, type) and issubclass(attr, smpplib.command.PDU) and hasattr(attr, 'parse_optional_params'):
-            attr.parse_optional_params = patched_parse_optional_params
-            logging.info(f"Patched {name} to handle unknown optional parameters.")
+        if (isinstance(attr, type) and
+                hasattr(attr, 'parse_optional_params') and
+                callable(getattr(attr, 'parse_optional_params'))):
+            classes_to_patch.append(attr)
+
+    # Also check if there are specific classes we know about
+    specific_classes = ['DeliverSM', 'SubmitSM', 'DataSM']
+    for class_name in specific_classes:
+        if hasattr(smpplib.command, class_name):
+            cls = getattr(smpplib.command, class_name)
+            if (isinstance(cls, type) and
+                    hasattr(cls, 'parse_optional_params') and
+                    callable(getattr(cls, 'parse_optional_params'))):
+                if cls not in classes_to_patch:
+                    classes_to_patch.append(cls)
+
+    # Apply the patch to all identified classes
+    for cls in classes_to_patch:
+        original_method = getattr(cls, 'parse_optional_params')
+        setattr(cls, 'parse_optional_params', patched_parse_optional_params)
+        logging.info(f"Patched {cls.__name__} to handle unknown optional parameters.")
 
 # Apply the generic patch
-patch_parse_optional_params()
+try:
+    patch_parse_optional_params()
+    logging.info("Optional parameter parsing patching completed")
+except Exception as e:
+    logging.warning(f"Failed to patch optional parameter parsing: {e}")
+
 
 class SmppClient(SmppConfig):
     """SMPP Client implementation using smpplib"""
@@ -83,7 +114,15 @@ class SmppClient(SmppConfig):
     def connect_gateway(self):
         """Connect to SMPP gateway"""
         self.conn = smpplib.client.Client(self.server_ip, self.server_port)
-        self.conn.set_message_received_handler(self.handle_message)
+
+        # Use a safe message handler wrapper
+        def safe_handle_message(pdu):
+            try:
+                self.handle_message(pdu)
+            except Exception as e:
+                self.logger.error(f"Error in message handler: {e}")
+
+        self.conn.set_message_received_handler(safe_handle_message)
 
         self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
                          f"systemType: {self.system_type} servicetype: {self.service_type}")
@@ -98,6 +137,7 @@ class SmppClient(SmppConfig):
             self._listen_thread = threading.Thread(target=self.conn.listen)
             self._listen_thread.daemon = True
             self._listen_thread.start()
+            self.logger.info("SMPP connection established successfully")
         except Exception as e:
             self.logger.error(f"Connection failed: {e}")
             raise
@@ -108,6 +148,7 @@ class SmppClient(SmppConfig):
             try:
                 self.conn.unbind()
                 self.conn.disconnect()
+                self.logger.info("SMPP connection disconnected successfully")
             except Exception as e:
                 self.logger.error(f"Error while disconnecting: {e}")
             finally:
@@ -126,12 +167,13 @@ class SmppClient(SmppConfig):
         try:
             if hasattr(pdu, 'command') and pdu.command == 'deliver_sm':
                 short_message = getattr(pdu, 'short_message', 'No message')
-                # Check if we have ussd_service_op
-                ussd_op = getattr(pdu, 'ussd_service_op', None)
-                if ussd_op:
-                    self.logger.info(f"Received deliver_sm with USSD op: {ussd_op}, message: {short_message}")
-                else:
-                    self.logger.info(f"Received deliver_sm: {short_message}")
+
+                # Log additional info for debugging
+                self.logger.debug(f"Received PDU: {pdu}")
+                if hasattr(pdu, 'optional_parameters') and pdu.optional_parameters:
+                    self.logger.debug(f"Optional parameters: {pdu.optional_parameters}")
+
+                self.logger.info(f"Received deliver_sm: {short_message}")
 
                 task = SendSubmitSm(self, pdu)
                 self.executor_service.submit(task.run)
@@ -142,4 +184,8 @@ class SmppClient(SmppConfig):
         """Submit a short message."""
         if not self.is_connected():
             raise Exception("Session not connected")
-        return self.conn.send_message(**kwargs)
+        try:
+            return self.conn.send_message(**kwargs)
+        except Exception as e:
+            self.logger.error(f"Error submitting message: {e}")
+            raise
