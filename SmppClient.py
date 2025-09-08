@@ -180,6 +180,9 @@ class SmppClient(SmppConfig):
                         self.logger.warning(f"Connection error in listen loop: {e}")
                         self._connected = False
                         break
+                    else:
+                        # We're intentionally stopping, so just break
+                        break
         except Exception as e:
             if self._should_run:  # Only log if we're supposed to be running
                 self.logger.error(f"Error in listen thread: {e}")
@@ -202,12 +205,15 @@ class SmppClient(SmppConfig):
                 finally:
                     self.conn = None
 
-            # Wait for listen thread to finish
+            # Wait for listen thread to finish with a timeout
             if self._listen_thread and self._listen_thread.is_alive():
                 self._listen_thread.join(timeout=2)  # Wait up to 2 seconds
 
             if self.executor_service:
+                # Give tasks a moment to finish, then force shutdown
                 self.executor_service.shutdown(wait=False)
+                # Wait a moment for tasks to finish
+                time.sleep(0.1)
 
     def is_connected(self) -> bool:
         """Check if client is connected"""

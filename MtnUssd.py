@@ -68,11 +68,11 @@ class MtnUssd(SmppConfig):
         def signal_handler(signum, frame):
             self._logger.info(f"Received signal {signum}, shutting down gracefully...")
             self.retry = False
-            # Give some time for the client to disconnect properly
+            # Make sure the client knows to stop as well
             if self.client_instance:
                 self.client_instance._should_run = False
-            time.sleep(0.1)  # Small delay to allow cleanup
-            sys.exit(0)
+            # Don't call sys.exit here, let the main loop handle the exit naturally
+            # This prevents multiple signal handlers from interfering with each other
 
         # Handle SIGINT (Ctrl+C) and SIGTERM
         signal.signal(signal.SIGINT, signal_handler)
@@ -93,9 +93,13 @@ class MtnUssd(SmppConfig):
 
             while self.retry:
                 try:
+                    # Check if we should still be running (this is critical for exit)
+                    if not self.retry:
+                        break
+
                     time.sleep(1.0)  # Sleep for 1 second (equivalent to Thread.sleep(1000L))
 
-                    # Check if we should still be running
+                    # Check if we should still be running after sleep
                     if not self.retry:
                         break
 
@@ -107,6 +111,10 @@ class MtnUssd(SmppConfig):
                         backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
                         self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
                         time.sleep(backoff_time)
+
+                        # Check if we should still be running after waiting
+                        if not self.retry:
+                            break
 
                         try:
                             success = self.client_instance.connect_gateway()
@@ -144,6 +152,8 @@ class MtnUssd(SmppConfig):
             # Ensure cleanup
             self.stop_client()
             print("MTN USSD service stopped.")
+            # Explicitly exit the application
+            sys.exit(0)
 
 
 def main():
