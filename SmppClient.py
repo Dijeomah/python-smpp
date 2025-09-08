@@ -57,7 +57,7 @@ def patch_parse_optional_params():
     # Patch all PDU classes in smpplib.command
     for name in dir(smpplib.command):
         attr = getattr(smpplib.command, name)
-        if isinstance(attr, type) and issubclass(attr, smpplib.command.pdu) and hasattr(attr, 'parse_optional_params'):
+        if isinstance(attr, type) and issubclass(attr, smpplib.command.PDU) and hasattr(attr, 'parse_optional_params'):
             attr.parse_optional_params = patched_parse_optional_params
             logging.info(f"Patched {name} to handle unknown optional parameters.")
 
