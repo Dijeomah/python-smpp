@@ -349,7 +349,7 @@ class SmppClient(SmppConfig):
     def _handle_disconnection(self):
         """Handle disconnection and schedule reconnection"""
         with self._lock:
-            if self._connected:  # Only process if we think we're connected
+            if not self._connected:  # Only process if we think we're connected
                 self._connected = False
                 self.session_state = SessionState.CLOSED
                 self.logger.warning("Connection lost, scheduling reconnection")
