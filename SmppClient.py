@@ -9,8 +9,6 @@ import smpplib.command
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
 
-# Remove the problematic custom class and use a simpler approach
-
 # Alternative: Use a function to patch the params if needed
 def patch_deliver_sm_if_needed():
     """Safely patch DeliverSM params if USSD service op constant exists"""
@@ -85,13 +83,17 @@ class SmppClient(SmppConfig):
 
     def is_connected(self) -> bool:
         """Check if client is connected"""
-        return self.conn is not None and self.conn.state == smpplib.consts.STATE_BOUND_TRX
+        # In smpplib 2.2.4, check the state string directly
+        return (self.conn is not None and
+                hasattr(self.conn, 'state') and
+                self.conn.state == 'BOUND_TRX')
 
     def handle_message(self, pdu):
         """Handle incoming messages"""
         try:
-            if pdu.command == 'deliver_sm':
-                self.logger.info(f"Received deliver_sm: {pdu.short_message}")
+            if hasattr(pdu, 'command') and pdu.command == 'deliver_sm':
+                short_message = getattr(pdu, 'short_message', 'No message')
+                self.logger.info(f"Received deliver_sm: {short_message}")
                 task = SendSubmitSm(self, pdu)
                 self.executor_service.submit(task.run)
         except Exception as e:
