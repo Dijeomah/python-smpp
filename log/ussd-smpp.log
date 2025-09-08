@@ -1,0 +1,46 @@
+[INFO] 2025-09-08 14:14:39 MtnUssd start_client - Starting SMPP client...
+[INFO] 2025-09-08 14:14:39 SmppClient _new_session - Binding with systemid: test/test123 systemType: USSD servicetype: USSD
+[ERROR] 2025-09-08 14:14:39 MtnUssd start_client - Failed to start SMPP client: Failed to connect to SMPP server: [Errno 61] Connection refused
+[ERROR] 2025-09-08 14:14:39 MtnUssd run - Fatal error in main application: Failed to connect to SMPP server: [Errno 61] Connection refused
+Traceback (most recent call last):
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 40, in connect
+    self.socket.connect((self.host, self.port))
+ConnectionRefusedError: [Errno 61] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/MtnUssd.py", line 78, in run
+    self.start_client()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/MtnUssd.py", line 40, in start_client
+    self.client_instance.connect_gateway()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 241, in connect_gateway
+    self.conn.connect()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 51, in connect
+    raise Exception(f"Failed to connect to SMPP server: {e}")
+Exception: Failed to connect to SMPP server: [Errno 61] Connection refused
+[INFO] 2025-09-08 14:14:39 MtnUssd stop_client - Stopping SMPP client...
+[INFO] 2025-09-08 14:14:39 SmppClient on_state_change - Session closed
+[INFO] 2025-09-08 14:14:39 SmppClient run - Schedule reconnect after 5000 millis
+[INFO] 2025-09-08 14:14:39 root disconnect - Disconnected from SMPP server
+[INFO] 2025-09-08 14:14:39 MtnUssd stop_client - SMPP client stopped
+[ERROR] 2025-09-08 14:14:39 root main - Failed to start MTN USSD service: Failed to connect to SMPP server: [Errno 61] Connection refused
+Traceback (most recent call last):
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 40, in connect
+    self.socket.connect((self.host, self.port))
+ConnectionRefusedError: [Errno 61] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/main.py", line 87, in main
+    ussd_service.run()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/MtnUssd.py", line 78, in run
+    self.start_client()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/MtnUssd.py", line 40, in start_client
+    self.client_instance.connect_gateway()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 241, in connect_gateway
+    self.conn.connect()
+  File "/Users/dramesuccess/IdeaProjects/Python/learnings/smpp/SmppClient.py", line 51, in connect
+    raise Exception(f"Failed to connect to SMPP server: {e}")
+Exception: Failed to connect to SMPP server: [Errno 61] Connection refused
