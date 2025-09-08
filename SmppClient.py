@@ -115,6 +115,7 @@ class SmppClient(SmppConfig):
         self._listen_thread = None
         self._connected = False
         self._should_run = True
+        self._last_heartbeat = time.time()
         self._lock = threading.Lock()
 
     def connect_gateway(self):
@@ -139,6 +140,8 @@ class SmppClient(SmppConfig):
             def safe_handle_message(pdu):
                 try:
                     self.handle_message(pdu)
+                    # Update heartbeat when we receive a message
+                    self._last_heartbeat = time.time()
                 except Exception as e:
                     self.logger.error(f"Error in message handler: {e}")
 
@@ -158,6 +161,7 @@ class SmppClient(SmppConfig):
 
                 self._connected = True
                 self._should_run = True
+                self._last_heartbeat = time.time()  # Reset heartbeat on successful connection
 
                 self._listen_thread = threading.Thread(target=self._listen)
                 self._listen_thread.daemon = True
@@ -190,8 +194,12 @@ class SmppClient(SmppConfig):
                         # Set a short timeout (1 second) so we can check _should_run frequently
                         self.conn.socket.settimeout(1.0)
                         self.conn.listen()
+                        # Update heartbeat when we successfully listen
+                        self._last_heartbeat = time.time()
                     except socket.timeout:
                         # This is expected with our short timeout, just continue the loop
+                        # But still update heartbeat since connection is alive
+                        self._last_heartbeat = time.time()
                         continue
                     except Exception as e:
                         # Check if we're intentionally stopping
@@ -250,9 +258,9 @@ class SmppClient(SmppConfig):
                 time.sleep(0.1)
 
     def is_connected(self) -> bool:
-        """Check if client is connected"""
+        """Check if client is connected with heartbeat mechanism"""
         with self._lock:
-            # Check if we think we're connected
+            # Basic checks first
             if not self._connected or self.conn is None:
                 return False
 
@@ -260,18 +268,13 @@ class SmppClient(SmppConfig):
             if not (hasattr(self.conn, 'state') and self.conn.state == 'BOUND_TRX'):
                 return False
 
-            # Try to validate the socket connection
-            try:
-                if hasattr(self.conn, 'socket') and self.conn.socket is not None:
-                    # Send a simple enquire_link to test connection
-                    self.conn.send_pdu(smpplib.command.EnquireLink())
-                    return True
-                else:
-                    return False
-            except Exception:
-                # If we can't send an enquire_link, we're probably disconnected
-                self._connected = False
+            # Check heartbeat - if we haven't heard anything in 60 seconds, consider disconnected
+            # This prevents false positives from the connection checking
+            if time.time() - self._last_heartbeat > 60:
+                self.logger.debug(f"Connection appears stale (last heartbeat: {time.time() - self._last_heartbeat} seconds ago)")
                 return False
+
+            return True
 
     def handle_message(self, pdu):
         """Handle incoming messages"""
@@ -297,7 +300,10 @@ class SmppClient(SmppConfig):
             if not self.is_connected():
                 raise Exception("Session not connected")
             try:
-                return self.conn.send_message(**kwargs)
+                result = self.conn.send_message(**kwargs)
+                # Update heartbeat on successful send
+                self._last_heartbeat = time.time()
+                return result
             except Exception as e:
                 self.logger.error(f"Error submitting message: {e}")
                 # Mark as disconnected if it's a connection error
