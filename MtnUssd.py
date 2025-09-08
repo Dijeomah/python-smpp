@@ -96,9 +96,11 @@ class MtnUssd(SmppConfig):
             self._logger.info("MTN USSD service is running. Press Ctrl+C to stop.")
             print("MTN USSD service is running. Press Ctrl+C to stop.")
 
-            # Main loop - equivalent to the infinite while loop in Java
+            # Main loop - improved logic to prevent rapid reconnection cycles
             connection_attempts = 0
             max_connection_attempts = 5
+            last_check_time = time.time()
+            check_interval = 10  # Check connection every 10 seconds instead of every second
 
             while self.retry:
                 try:
@@ -106,47 +108,64 @@ class MtnUssd(SmppConfig):
                     if not self.retry:
                         break
 
-                    # Check if client is still connected using improved logic
-                    if self.client_instance and not self.client_instance.is_connected():
-                        self._logger.warning("SMPP client disconnected.")
+                    current_time = time.time()
 
-                        # Only try to reconnect if the port is open
-                        if self._can_connect_to_server():
-                            connection_attempts += 1
-                            self._logger.info(f"Server is reachable. Reconnection attempt #{connection_attempts}.")
-                            
-                            # Exponential backoff for reconnection attempts
-                            backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
-                            self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
-                            time.sleep(backoff_time)
+                    # Only check connection status periodically to reduce CPU usage
+                    if current_time - last_check_time >= check_interval:
+                        last_check_time = current_time
 
-                            # Check if we should still be running after waiting
-                            if not self.retry:
-                                break
+                        # Check if client is still connected
+                        if self.client_instance and not self.client_instance.is_connected():
+                            self._logger.warning("SMPP client disconnected.")
 
-                            try:
-                                success = self.client_instance.connect_gateway()
-                                if success:
-                                    connection_attempts = 0  # Reset on successful connection
-                                    self._logger.info("Reconnection successful")
-                                else:
-                                    self._logger.error(f"Reconnection attempt {connection_attempts} failed")
+                            # Only try to reconnect if the server is reachable
+                            if self._can_connect_to_server():
+                                connection_attempts += 1
+                                self._logger.info(f"Server is reachable. Reconnection attempt #{connection_attempts}.")
+
+                                # Exponential backoff for reconnection attempts
+                                backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
+                                self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
+
+                                # Wait with periodic checks for shutdown signal
+                                for _ in range(int(backoff_time)):
+                                    if not self.retry:
+                                        break
+                                    time.sleep(1.0)
+
+                                # Check if we should still be running after waiting
+                                if not self.retry:
+                                    break
+
+                                try:
+                                    success = self.client_instance.connect_gateway()
+                                    if success:
+                                        connection_attempts = 0  # Reset on successful connection
+                                        self._logger.info("Reconnection successful")
+                                    else:
+                                        self._logger.error(f"Reconnection attempt {connection_attempts} failed")
+                                        if connection_attempts >= max_connection_attempts:
+                                            self._logger.error("Maximum reconnection attempts reached. Exiting.")
+                                            self.retry = False
+                                except Exception as reconnect_error:
+                                    self._logger.error(f"Reconnection failed: {reconnect_error}")
                                     if connection_attempts >= max_connection_attempts:
                                         self._logger.error("Maximum reconnection attempts reached. Exiting.")
                                         self.retry = False
-                            except Exception as reconnect_error:
-                                self._logger.error(f"Reconnection failed: {reconnect_error}")
-                                if connection_attempts >= max_connection_attempts:
-                                    self._logger.error("Maximum reconnection attempts reached. Exiting.")
-                                    self.retry = False
-                        else:
-                            self._logger.warning(f"Server {self.server_ip}:{self.server_port} is not reachable. Waiting 30 seconds.")
-                            time.sleep(30)
-                    else:
-                        # Connection is good, reset connection attempts counter
-                        connection_attempts = 0
+                            else:
+                                self._logger.warning(f"Server {self.server_ip}:{self.server_port} is not reachable. Waiting 30 seconds.")
 
-                    time.sleep(1.0)  # Sleep for 1 second before the next check
+                                # Wait 30 seconds with periodic checks for shutdown
+                                for _ in range(30):
+                                    if not self.retry:
+                                        break
+                                    time.sleep(1.0)
+                        else:
+                            # Connection is good, reset connection attempts counter
+                            connection_attempts = 0
+
+                    # Sleep for a reasonable interval before next check
+                    time.sleep(1.0)
 
                 except KeyboardInterrupt:
                     self._logger.info("Keyboard interrupt received, shutting down...")

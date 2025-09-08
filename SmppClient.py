@@ -117,6 +117,7 @@ class SmppClient(SmppConfig):
         self._should_run = True
         self._last_heartbeat = time.time()
         self._lock = threading.Lock()
+        self._enquire_link_thread = None
 
     def connect_gateway(self):
         """Connect to SMPP gateway"""
@@ -163,9 +164,16 @@ class SmppClient(SmppConfig):
                 self._should_run = True
                 self._last_heartbeat = time.time()  # Reset heartbeat on successful connection
 
+                # Start the listen thread
                 self._listen_thread = threading.Thread(target=self._listen)
                 self._listen_thread.daemon = True
                 self._listen_thread.start()
+
+                # Start enquire link thread for keep-alive
+                self._enquire_link_thread = threading.Thread(target=self._enquire_link_loop)
+                self._enquire_link_thread.daemon = True
+                self._enquire_link_thread.start()
+
                 self.logger.info("SMPP connection established successfully")
                 return True
             except Exception as e:
@@ -176,44 +184,59 @@ class SmppClient(SmppConfig):
     def _listen(self):
         """Listen for incoming messages with proper error handling for smpplib 2.2.4"""
         try:
-            # For smpplib 2.2.4, we need to handle the listening differently
-            # since listen() doesn't support timeout parameter
             while self._should_run and self._connected and self.conn:
                 try:
                     # Check if socket is still valid
                     if not hasattr(self.conn, 'socket') or self.conn.socket is None:
+                        self.logger.warning("Socket is None, marking as disconnected")
                         self._connected = False
                         break
 
-                    # Set a short timeout on the socket for smpplib 2.2.4
+                    # Check connection state
+                    if hasattr(self.conn, 'state') and self.conn.state != 'BOUND_TRX':
+                        self.logger.warning(f"Connection state is {self.conn.state}, expected BOUND_TRX")
+                        self._connected = False
+                        break
+
+                    # For smpplib 2.2.4, use the listen method without timeout
+                    # We'll implement our own timeout mechanism
                     original_timeout = None
                     if hasattr(self.conn.socket, 'gettimeout'):
                         original_timeout = self.conn.socket.gettimeout()
 
                     try:
-                        # Set a short timeout (1 second) so we can check _should_run frequently
-                        self.conn.socket.settimeout(1.0)
+                        # Set a reasonable timeout (30 seconds)
+                        self.conn.socket.settimeout(30.0)
                         self.conn.listen()
                         # Update heartbeat when we successfully listen
                         self._last_heartbeat = time.time()
+
                     except socket.timeout:
-                        # This is expected with our short timeout, just continue the loop
-                        # But still update heartbeat since connection is alive
+                        # Timeout is normal, just continue the loop
+                        # Update heartbeat to show we're still trying
                         self._last_heartbeat = time.time()
                         continue
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
+                        self.logger.warning(f"Connection lost in listen loop: {e}")
+                        self._connected = False
+                        break
                     except Exception as e:
                         # Check if we're intentionally stopping
                         if not self._should_run:
                             break
-                        # Actual connection error
-                        if self._should_run and self._connected:
-                            self.logger.warning(f"Connection error in listen loop: {e}")
+                        # Log other errors but don't necessarily disconnect
+                        self.logger.warning(f"Error in listen loop: {e}")
+                        # Only mark as disconnected if it's a serious connection error
+                        if "not connected" in str(e).lower() or "socket" in str(e).lower():
                             self._connected = False
                             break
                     finally:
                         # Restore original timeout if it existed
                         if original_timeout is not None and hasattr(self.conn.socket, 'settimeout'):
-                            self.conn.socket.settimeout(original_timeout)
+                            try:
+                                self.conn.socket.settimeout(original_timeout)
+                            except:
+                                pass
 
                 except Exception as e:
                     # Check if we're intentionally stopping
@@ -221,13 +244,43 @@ class SmppClient(SmppConfig):
                         break
                     # Actual error
                     if self._should_run and self._connected:
-                        self.logger.warning(f"Connection error in listen loop: {e}")
+                        self.logger.warning(f"Outer error in listen loop: {e}")
                         self._connected = False
                         break
 
+                # Small sleep to prevent tight loop
+                time.sleep(0.1)
+
         except Exception as e:
             if self._should_run:  # Only log if we're supposed to be running
-                self.logger.error(f"Error in listen thread: {e}")
+                self.logger.error(f"Fatal error in listen thread: {e}")
+                self._connected = False
+
+    def _enquire_link_loop(self):
+        """Send enquire_link messages periodically to keep connection alive"""
+        while self._should_run and self._connected:
+            try:
+                time.sleep(30)  # Send every 30 seconds
+
+                if not self._should_run or not self._connected:
+                    break
+
+                if self.conn and hasattr(self.conn, 'state') and self.conn.state == 'BOUND_TRX':
+                    try:
+                        # Send enquire_link
+                        self.conn.enquire_link()
+                        self.logger.debug("Sent enquire_link")
+                        self._last_heartbeat = time.time()
+                    except Exception as e:
+                        self.logger.warning(f"Failed to send enquire_link: {e}")
+                        self._connected = False
+                        break
+
+            except Exception as e:
+                if self._should_run:
+                    self.logger.error(f"Error in enquire_link loop: {e}")
+                    self._connected = False
+                break
 
     def disconnect(self):
         """Disconnect from SMPP gateway"""
@@ -249,7 +302,11 @@ class SmppClient(SmppConfig):
 
             # Wait for listen thread to finish with a timeout
             if self._listen_thread and self._listen_thread.is_alive():
-                self._listen_thread.join(timeout=2)  # Wait up to 2 seconds
+                self._listen_thread.join(timeout=5)  # Wait up to 5 seconds
+
+            # Wait for enquire_link thread to finish
+            if self._enquire_link_thread and self._enquire_link_thread.is_alive():
+                self._enquire_link_thread.join(timeout=2)
 
             if self.executor_service:
                 # Give tasks a moment to finish, then force shutdown
@@ -258,7 +315,7 @@ class SmppClient(SmppConfig):
                 time.sleep(0.1)
 
     def is_connected(self) -> bool:
-        """Check if client is connected with heartbeat mechanism"""
+        """Check if client is connected"""
         with self._lock:
             # Basic checks first
             if not self._connected or self.conn is None:
@@ -268,10 +325,8 @@ class SmppClient(SmppConfig):
             if not (hasattr(self.conn, 'state') and self.conn.state == 'BOUND_TRX'):
                 return False
 
-            # Check heartbeat - if we haven't heard anything in 60 seconds, consider disconnected
-            # This prevents false positives from the connection checking
-            if time.time() - self._last_heartbeat > 60:
-                self.logger.debug(f"Connection appears stale (last heartbeat: {time.time() - self._last_heartbeat} seconds ago)")
+            # Check if socket is still valid
+            if not hasattr(self.conn, 'socket') or self.conn.socket is None:
                 return False
 
             return True
@@ -280,7 +335,9 @@ class SmppClient(SmppConfig):
         """Handle incoming messages"""
         try:
             if hasattr(pdu, 'command') and pdu.command == 'deliver_sm':
-                short_message = getattr(pdu, 'short_message', 'No message')
+                short_message = getattr(pdu, 'short_message', b'No message')
+                if isinstance(short_message, bytes):
+                    short_message = short_message.decode('utf-8', errors='ignore')
 
                 # Log additional info for debugging
                 self.logger.debug(f"Received PDU: {pdu}")
@@ -291,6 +348,15 @@ class SmppClient(SmppConfig):
 
                 task = SendSubmitSm(self, pdu)
                 self.executor_service.submit(task.run)
+
+            elif hasattr(pdu, 'command') and pdu.command == 'enquire_link':
+                # Respond to enquire_link automatically
+                try:
+                    self.conn.enquire_link_resp()
+                    self.logger.debug("Responded to enquire_link")
+                except Exception as e:
+                    self.logger.error(f"Failed to respond to enquire_link: {e}")
+
         except Exception as e:
             self.logger.error(f"Error handling message: {e}")
 
