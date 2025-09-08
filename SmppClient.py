@@ -88,11 +88,11 @@ def patch_parse_optional_params():
         logging.info(f"Patched {cls.__name__} to handle unknown optional parameters.")
 
 # Apply the generic patch
-try:
-    patch_parse_optional_params()
-    logging.info("Optional parameter parsing patching completed")
-except Exception as e:
-    logging.warning(f"Failed to patch optional parameter parsing: {e}")
+# try:
+#     patch_parse_optional_params()
+#     logging.info("Optional parameter parsing patching completed")
+# except Exception as e:
+#     logging.warning(f"Failed to patch optional parameter parsing: {e}")
 
 
 class SmppClient(SmppConfig):
