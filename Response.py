@@ -43,9 +43,9 @@ class Response(SmppConfig):
                                  f"NEWREQUEST: {session_id} SESSION: {session_id}")
 
                 encoded_payload = urllib.parse.quote(payload, safe='')
-                call_url = (f"{self.process_url}?msisdn={msisdn}&input={encoded_payload}")
-                if session_id:
-                    call_url += f"&sessionid={session_id}"
+                call_url = f"{self.process_url}?msisdn={msisdn}&input={encoded_payload}&sessionid={session_id}"
+                # if session_id:
+                #     call_url += f"&sessionid={session_id}"
 
                 menu_response = self.http_request(call_url)
 
