@@ -9,22 +9,27 @@ import smpplib.command
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
 
-# Custom DeliverSM handler for USSD support
-class CustomDeliverSM(smpplib.command.DeliverSM):
-    """Custom DeliverSM with USSD support"""
+# Remove the problematic custom class and use a simpler approach
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Add USSD parameter if the constant exists
-        if hasattr(smpplib.consts, 'TAG_USSD_SERVICE_OP'):
-            self.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
-                'name': 'ussd_service_op',
-                'type': bytes,  # Use bytes instead of OctetString
-            }
+# Alternative: Use a function to patch the params if needed
+def patch_deliver_sm_if_needed():
+    """Safely patch DeliverSM params if USSD service op constant exists"""
+    if (hasattr(smpplib.command, 'DeliverSM') and
+            hasattr(smpplib.consts, 'TAG_USSD_SERVICE_OP') and
+            hasattr(smpplib.command.DeliverSM, 'params') and
+            isinstance(smpplib.command.DeliverSM.params, dict)):
 
-# Replace the DeliverSM class if needed
-if hasattr(smpplib.command, 'DeliverSM'):
-    smpplib.command.DeliverSM = CustomDeliverSM
+        # Use bytes instead of OctetString
+        smpplib.command.DeliverSM.params[smpplib.consts.TAG_USSD_SERVICE_OP] = {
+            'name': 'ussd_service_op',
+            'type': bytes,
+        }
+        logging.getLogger(__name__).info("Successfully patched DeliverSM for USSD support")
+    else:
+        logging.getLogger(__name__).warning("Could not patch DeliverSM - required attributes not found")
+
+# Apply the patch
+patch_deliver_sm_if_needed()
 
 
 class SmppClient(SmppConfig):
@@ -50,14 +55,20 @@ class SmppClient(SmppConfig):
 
         self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
                          f"systemType: {self.system_type} servicetype: {self.service_type}")
-        self.conn.connect()
-        self.conn.bind_transceiver(
-            system_id=self.account,
-            password=self.password,
-            system_type=self.system_type,
-        )
-        self._listen_thread = threading.Thread(target=self.conn.listen)
-        self._listen_thread.start()
+
+        try:
+            self.conn.connect()
+            self.conn.bind_transceiver(
+                system_id=self.account,
+                password=self.password,
+                system_type=self.system_type,
+            )
+            self._listen_thread = threading.Thread(target=self.conn.listen)
+            self._listen_thread.daemon = True  # Make it a daemon thread
+            self._listen_thread.start()
+        except Exception as e:
+            self.logger.error(f"Connection failed: {e}")
+            raise
 
     def disconnect(self):
         """Disconnect from SMPP gateway"""
@@ -65,21 +76,26 @@ class SmppClient(SmppConfig):
             try:
                 self.conn.unbind()
                 self.conn.disconnect()
-            except smpplib.exceptions.PDUError as e:
+            except Exception as e:
                 self.logger.error(f"Error while disconnecting: {e}")
-            self.conn = None
-        self.executor_service.shutdown()
+            finally:
+                self.conn = None
+        if self.executor_service:
+            self.executor_service.shutdown(wait=False)
 
     def is_connected(self) -> bool:
         """Check if client is connected"""
-        return self.conn is not None and self.conn.state == 'BOUND_TRX'
+        return self.conn is not None and self.conn.state == smpplib.consts.STATE_BOUND_TRX
 
     def handle_message(self, pdu):
         """Handle incoming messages"""
-        if pdu.command == 'deliver_sm':
-            self.logger.info(f"Received deliver_sm: {pdu.short_message}")
-            task = SendSubmitSm(self, pdu)
-            self.executor_service.submit(task.run)
+        try:
+            if pdu.command == 'deliver_sm':
+                self.logger.info(f"Received deliver_sm: {pdu.short_message}")
+                task = SendSubmitSm(self, pdu)
+                self.executor_service.submit(task.run)
+        except Exception as e:
+            self.logger.error(f"Error handling message: {e}")
 
     def submit_short_message(self, **kwargs):
         """Submit a short message."""
