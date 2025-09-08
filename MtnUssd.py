@@ -3,6 +3,7 @@ import time
 import logging
 import signal
 import sys
+import socket
 from typing import Optional
 
 # Import the Config class we created earlier
@@ -32,6 +33,16 @@ class MtnUssd(SmppConfig):
 
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
+
+    def _can_connect_to_server(self) -> bool:
+        """Checks if a TCP connection can be established to the SMPP server."""
+        try:
+            with socket.create_connection((self.server_ip, self.server_port), timeout=5) as sock:
+                self._logger.debug(f"Successfully connected to {self.server_ip}:{self.server_port}")
+                return True
+        except (socket.timeout, ConnectionRefusedError, OSError) as e:
+            self._logger.warning(f"Connectivity check to {self.server_ip}:{self.server_port} failed: {e}")
+            return False
 
     def start_client(self) -> None:
         """Start the SMPP client and connect to gateway"""
@@ -95,45 +106,47 @@ class MtnUssd(SmppConfig):
                     if not self.retry:
                         break
 
-                    time.sleep(1.0)  # Sleep for 1 second (equivalent to Thread.sleep(1000L))
-
-                    # Check if we should still be running after sleep
-                    if not self.retry:
-                        break
-
                     # Check if client is still connected using improved logic
                     if self.client_instance and not self.client_instance.is_connected():
-                        self._logger.warning("SMPP client disconnected, attempting to reconnect...")
+                        self._logger.warning("SMPP client disconnected.")
 
-                        # Exponential backoff for reconnection attempts
-                        backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
-                        self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
-                        time.sleep(backoff_time)
+                        # Only try to reconnect if the port is open
+                        if self._can_connect_to_server():
+                            connection_attempts += 1
+                            self._logger.info(f"Server is reachable. Reconnection attempt #{connection_attempts}.")
+                            
+                            # Exponential backoff for reconnection attempts
+                            backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
+                            self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
+                            time.sleep(backoff_time)
 
-                        # Check if we should still be running after waiting
-                        if not self.retry:
-                            break
+                            # Check if we should still be running after waiting
+                            if not self.retry:
+                                break
 
-                        try:
-                            success = self.client_instance.connect_gateway()
-                            if success:
-                                connection_attempts = 0  # Reset on successful connection
-                                self._logger.info("Reconnection successful")
-                            else:
-                                connection_attempts += 1
-                                self._logger.error(f"Reconnection attempt {connection_attempts} failed")
+                            try:
+                                success = self.client_instance.connect_gateway()
+                                if success:
+                                    connection_attempts = 0  # Reset on successful connection
+                                    self._logger.info("Reconnection successful")
+                                else:
+                                    self._logger.error(f"Reconnection attempt {connection_attempts} failed")
+                                    if connection_attempts >= max_connection_attempts:
+                                        self._logger.error("Maximum reconnection attempts reached. Exiting.")
+                                        self.retry = False
+                            except Exception as reconnect_error:
+                                self._logger.error(f"Reconnection failed: {reconnect_error}")
                                 if connection_attempts >= max_connection_attempts:
                                     self._logger.error("Maximum reconnection attempts reached. Exiting.")
                                     self.retry = False
-                        except Exception as reconnect_error:
-                            connection_attempts += 1
-                            self._logger.error(f"Reconnection failed: {reconnect_error}")
-                            if connection_attempts >= max_connection_attempts:
-                                self._logger.error("Maximum reconnection attempts reached. Exiting.")
-                                self.retry = False
+                        else:
+                            self._logger.warning(f"Server {self.server_ip}:{self.server_port} is not reachable. Waiting 30 seconds.")
+                            time.sleep(30)
                     else:
                         # Connection is good, reset connection attempts counter
                         connection_attempts = 0
+
+                    time.sleep(1.0)  # Sleep for 1 second before the next check
 
                 except KeyboardInterrupt:
                     self._logger.info("Keyboard interrupt received, shutting down...")
