@@ -2,6 +2,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import logging
+import uuid
 from SmppConfig import SmppConfig
 import smpplib.consts
 
@@ -12,6 +13,10 @@ class Response(SmppConfig):
         super().__init__()
         self.logger = logging.getLogger(__name__)
 
+    def _generate_session_id(self) -> str:
+        """Generates a unique session ID."""
+        return uuid.uuid4().hex
+
     def process_deliver_sm_request(self, smpp_client, pdu):
         """Process incoming DeliverSM request"""
         try:
@@ -21,7 +26,7 @@ class Response(SmppConfig):
             print(f"RECEIVING USSD::::::::::{payload}")
 
             if payload.strip():
-                session_id = "0"  # Default session ID
+                session_id = None
                 if hasattr(pdu, 'optional_parameters') and pdu.optional_parameters:
                     for tag, value in pdu.optional_parameters.items():
                         # Check for session info in different possible tag formats
@@ -30,13 +35,16 @@ class Response(SmppConfig):
                                 (hasattr(smpplib.consts, 'Tag') and hasattr(smpplib.consts.Tag, 'its_session_info') and tag == smpplib.consts.Tag.its_session_info)):
                             session_id = str(value.decode())
 
+                if session_id is None:
+                    session_id = self._generate_session_id()
+
                 self.logger.info(f"MSISDN: {msisdn} INPUT: {payload} "
                                  f"NEWREQUEST: {session_id} SESSION: {session_id}")
 
                 encoded_payload = urllib.parse.quote(payload, safe='')
-                call_url = (f"{self.process_url}?msisdn={msisdn}&sessionid={session_id}"
-                            f"&input={encoded_payload}&sendussd_port={self.send_ussd_port}"
-                            f"&network={self.network}")
+                call_url = (f"{self.process_url}?msisdn={msisdn}&input={encoded_payload}")
+                if session_id:
+                    call_url += f"&sessionid={session_id}"
 
                 menu_response = self.http_request(call_url)
 
@@ -47,13 +55,13 @@ class Response(SmppConfig):
             self.logger.error(f"Error processing DeliverSM request: {e}", exc_info=True)
 
     def send_submit_sm(self, smpp_client, message: str, source: str, destination: str,
-                       session_id: str):
+                       session_id: str or None):
         """Send USSD response message via SMPP"""
         try:
             optional_parameters = {}
 
             # Handle session info - check for different constant names
-            if session_id != "0":
+            if session_id and session_id != "0":
                 session_tag = None
                 # Check various possible tag names
                 if hasattr(smpplib.consts, 'TAG_ITS_SESSION_INFO'):
