@@ -3,6 +3,7 @@ import logging
 import threading
 import struct
 import time
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import smpplib.client
@@ -169,20 +170,53 @@ class SmppClient(SmppConfig):
                 raise
 
     def _listen(self):
-        """Listen for incoming messages with proper error handling"""
+        """Listen for incoming messages with proper error handling for smpplib 2.2.4"""
         try:
+            # For smpplib 2.2.4, we need to handle the listening differently
+            # since listen() doesn't support timeout parameter
             while self._should_run and self._connected and self.conn:
                 try:
-                    # Use a short timeout so we can check _should_run periodically
-                    self.conn.listen(timeout=1)
+                    # Check if socket is still valid
+                    if not hasattr(self.conn, 'socket') or self.conn.socket is None:
+                        self._connected = False
+                        break
+
+                    # Set a short timeout on the socket for smpplib 2.2.4
+                    original_timeout = None
+                    if hasattr(self.conn.socket, 'gettimeout'):
+                        original_timeout = self.conn.socket.gettimeout()
+
+                    try:
+                        # Set a short timeout (1 second) so we can check _should_run frequently
+                        self.conn.socket.settimeout(1.0)
+                        self.conn.listen()
+                    except socket.timeout:
+                        # This is expected with our short timeout, just continue the loop
+                        continue
+                    except Exception as e:
+                        # Check if we're intentionally stopping
+                        if not self._should_run:
+                            break
+                        # Actual connection error
+                        if self._should_run and self._connected:
+                            self.logger.warning(f"Connection error in listen loop: {e}")
+                            self._connected = False
+                            break
+                    finally:
+                        # Restore original timeout if it existed
+                        if original_timeout is not None and hasattr(self.conn.socket, 'settimeout'):
+                            self.conn.socket.settimeout(original_timeout)
+
                 except Exception as e:
-                    if self._should_run and self._connected:  # Only log if we're supposed to be connected
+                    # Check if we're intentionally stopping
+                    if not self._should_run:
+                        break
+                    # Actual error
+                    if self._should_run and self._connected:
                         self.logger.warning(f"Connection error in listen loop: {e}")
                         self._connected = False
                         break
-                    else:
-                        # We're intentionally stopping, so just break
-                        break
+
         except Exception as e:
             if self._should_run:  # Only log if we're supposed to be running
                 self.logger.error(f"Error in listen thread: {e}")
