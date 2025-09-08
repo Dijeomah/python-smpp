@@ -32,6 +32,7 @@ class SmppConfig:
         self.service_code: Optional[str] = None
         self.service_type: Optional[str] = None
         self.process_url: str = ""
+        self.network: str = ""
         self.send_ussd_port: int = 0
         self.number_of_threads: int = 10
         self.send_ussd_username: Optional[str] = None
@@ -200,7 +201,7 @@ NUMBER_OF_THREADS=10
             f.write(sample_config)
 
     # Test the configuration
-    config = Config()
+    config = SmppConfig()
     print(f"Server: {config.server_ip}:{config.server_port}")
     print(f"Account: {config.account}")
     print(f"Service Code: {config.service_code}")

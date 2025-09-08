@@ -57,7 +57,7 @@ class Response(SmppConfig):
                 encoded_payload = urllib.parse.quote(payload, safe='')
                 call_url = (f"{self.process_url}?msisdn={msisdn}&sessionid={session_id}"
                             f"&input={encoded_payload}&sendussd_port={self.send_ussd_port}"
-                            f"&network=MTN")
+                            f"&network={self.network}")
 
                 # Make HTTP request to process the USSD
                 menu_response = self.http_request(call_url)
