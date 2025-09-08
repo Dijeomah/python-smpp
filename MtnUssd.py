@@ -68,7 +68,10 @@ class MtnUssd(SmppConfig):
         def signal_handler(signum, frame):
             self._logger.info(f"Received signal {signum}, shutting down gracefully...")
             self.retry = False
-            self.stop_client()
+            # Give some time for the client to disconnect properly
+            if self.client_instance:
+                self.client_instance._should_run = False
+            time.sleep(0.1)  # Small delay to allow cleanup
             sys.exit(0)
 
         # Handle SIGINT (Ctrl+C) and SIGTERM
@@ -91,6 +94,10 @@ class MtnUssd(SmppConfig):
             while self.retry:
                 try:
                     time.sleep(1.0)  # Sleep for 1 second (equivalent to Thread.sleep(1000L))
+
+                    # Check if we should still be running
+                    if not self.retry:
+                        break
 
                     # Check if client is still connected
                     if self.client_instance and not self.client_instance.is_connected():

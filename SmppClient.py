@@ -2,6 +2,7 @@
 import logging
 import threading
 import struct
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import smpplib.client
@@ -112,6 +113,7 @@ class SmppClient(SmppConfig):
         self.executor_service = ThreadPoolExecutor(max_workers=self.number_of_threads)
         self._listen_thread = None
         self._connected = False
+        self._should_run = True
         self._lock = threading.Lock()
 
     def connect_gateway(self):
@@ -120,7 +122,8 @@ class SmppClient(SmppConfig):
             # Close existing connection if any
             if self.conn:
                 try:
-                    self.conn.unbind()
+                    if hasattr(self.conn, 'state') and self.conn.state in ['BOUND_TRX', 'BOUND_TX', 'BOUND_RX']:
+                        self.conn.unbind()
                 except:
                     pass
                 try:
@@ -151,9 +154,10 @@ class SmppClient(SmppConfig):
                     system_type=self.system_type,
                 )
                 self.logger.debug(f"Bind response: {resp}")
-                
+
                 self._connected = True
-                
+                self._should_run = True
+
                 self._listen_thread = threading.Thread(target=self._listen)
                 self._listen_thread.daemon = True
                 self._listen_thread.start()
@@ -167,21 +171,25 @@ class SmppClient(SmppConfig):
     def _listen(self):
         """Listen for incoming messages with proper error handling"""
         try:
-            while self._connected and self.conn:
+            while self._should_run and self._connected and self.conn:
                 try:
-                    self.conn.listen()
+                    # Use a short timeout so we can check _should_run periodically
+                    self.conn.listen(timeout=1)
                 except Exception as e:
-                    if self._connected:  # Only log if we're supposed to be connected
+                    if self._should_run and self._connected:  # Only log if we're supposed to be connected
                         self.logger.warning(f"Connection error in listen loop: {e}")
                         self._connected = False
                         break
         except Exception as e:
-            self.logger.error(f"Error in listen thread: {e}")
+            if self._should_run:  # Only log if we're supposed to be running
+                self.logger.error(f"Error in listen thread: {e}")
 
     def disconnect(self):
         """Disconnect from SMPP gateway"""
         with self._lock:
+            self._should_run = False
             self._connected = False
+
             if self.conn:
                 try:
                     # Only unbind if we're actually bound
@@ -193,6 +201,11 @@ class SmppClient(SmppConfig):
                     self.logger.error(f"Error while disconnecting: {e}")
                 finally:
                     self.conn = None
+
+            # Wait for listen thread to finish
+            if self._listen_thread and self._listen_thread.is_alive():
+                self._listen_thread.join(timeout=2)  # Wait up to 2 seconds
+
             if self.executor_service:
                 self.executor_service.shutdown(wait=False)
 
