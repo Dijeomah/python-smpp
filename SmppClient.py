@@ -1,16 +1,68 @@
 import logging
 import threading
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 import smpplib.client
 import smpplib.consts
 import smpplib.gsm
 import smpplib.command
+import smpplib.pdu
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
 
-# NO MONKEY PATCHING - this might be the simplest solution
-# If USSD functionality is not required, don't patch
+def patch_parse_optional_params():
+    """Patch PDU classes to handle unknown optional parameters gracefully."""
+
+    def patched_parse_optional_params(self, data):
+        pos = 0
+        while pos < len(data):
+            try:
+                # Need at least 4 bytes for tag and length
+                if len(data) - pos < 4:
+                    break
+
+                field, length = struct.unpack('!HH', data[pos:pos+4])
+                value_start = pos + 4
+                value_end = value_start + length
+
+                if value_end > len(data):
+                    logging.warning(f"Invalid length for optional parameter with tag {field}. Skipping.")
+                    break
+
+                if field in self.params:
+                    param = self.params[field]
+                    value = data[value_start:value_end]
+                    param_name = param.get('name')
+                    param_type = param.get('type')
+
+                    if not param_name or not param_type:
+                        logging.warning(f"Optional parameter with tag {field} is misconfigured. Ignoring.")
+                    else:
+                        if param.get('multi'):
+                            if not hasattr(self, param_name):
+                                setattr(self, param_name, [])
+                            getattr(self, param_name).append(param_type(value))
+                        else:
+                            setattr(self, param_name, param_type(value))
+                else:
+                    logging.warning(f"Unrecognized optional parameter with tag {field}. Ignoring.")
+
+                pos = value_end
+
+            except struct.error as e:
+                logging.error(f"Error unpacking optional parameter: {e}. Remaining data: {data[pos:]}")
+                break
+
+    # Patch all PDU classes in smpplib.command
+    for name in dir(smpplib.command):
+        attr = getattr(smpplib.command, name)
+        if isinstance(attr, type) and issubclass(attr, smpplib.command.pdu) and hasattr(attr, 'parse_optional_params'):
+            attr.parse_optional_params = patched_parse_optional_params
+            logging.info(f"Patched {name} to handle unknown optional parameters.")
+
+# Apply the generic patch
+patch_parse_optional_params()
 
 class SmppClient(SmppConfig):
     """SMPP Client implementation using smpplib"""
@@ -31,16 +83,7 @@ class SmppClient(SmppConfig):
     def connect_gateway(self):
         """Connect to SMPP gateway"""
         self.conn = smpplib.client.Client(self.server_ip, self.server_port)
-
-        # Use a wrapper to handle parsing errors
-        def safe_handle_message(pdu):
-            try:
-                self.handle_message(pdu)
-            except Exception as e:
-                self.logger.error(f"Error in message handler: {e}")
-                # Continue listening despite errors
-
-        self.conn.set_message_received_handler(safe_handle_message)
+        self.conn.set_message_received_handler(self.handle_message)
 
         self.logger.info(f"Binding with systemid: {self.account}/{self.password} "
                          f"systemType: {self.system_type} servicetype: {self.service_type}")
@@ -83,7 +126,13 @@ class SmppClient(SmppConfig):
         try:
             if hasattr(pdu, 'command') and pdu.command == 'deliver_sm':
                 short_message = getattr(pdu, 'short_message', 'No message')
-                self.logger.info(f"Received deliver_sm: {short_message}")
+                # Check if we have ussd_service_op
+                ussd_op = getattr(pdu, 'ussd_service_op', None)
+                if ussd_op:
+                    self.logger.info(f"Received deliver_sm with USSD op: {ussd_op}, message: {short_message}")
+                else:
+                    self.logger.info(f"Received deliver_sm: {short_message}")
+
                 task = SendSubmitSm(self, pdu)
                 self.executor_service.submit(task.run)
         except Exception as e:
