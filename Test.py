@@ -2,6 +2,7 @@
 import logging
 from SmppClient import SmppClient
 from SmppConfig import SmppConfig
+import smpplib.consts
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -26,43 +27,29 @@ def main():
         # Connect to the SMPP gateway
         client.connect_gateway()
 
-        if client.is_connected():
-            logging.info("Successfully connected to the SMPP gateway.")
+        logging.info("Successfully connected to the SMPP gateway.")
 
-            # Send a sample message
-            client.conn.submit_short_message(
-                service_type="",
-                source_ton="UNKNOWN",
-                source_npi="UNKNOWN",
-                source_addr="12345",
-                dest_ton="UNKNOWN",
-                dest_npi="UNKNOWN",
-                dest_addr="54321",
-                esm_class=0,
-                protocol_id=0,
-                priority_flag=0,
-                schedule_delivery_time="",
-                validity_period="",
-                registered_delivery=0,
-                replace_if_present_flag=0,
-                data_coding=0,
-                sm_default_msg_id=0,
-                short_message="Hello from Python!"
-            )
+        # Send a sample message
+        client.submit_short_message(
+            source_addr="12345",
+            destination_addr="54321",
+            short_message="Hello from Python!",
+            source_addr_ton=smpplib.consts.SMPP_TON_INTL,
+            source_addr_npi=smpplib.consts.SMPP_NPI_ISDN,
+            dest_addr_ton=smpplib.consts.SMPP_TON_INTL,
+            dest_addr_npi=smpplib.consts.SMPP_NPI_ISDN,
+            data_coding=smpplib.consts.SMPP_ENCODING_DEFAULT,
+        )
 
-            logging.info("Message sent successfully.")
-
-        else:
-            logging.error("Failed to connect to the SMPP gateway.")
+        logging.info("Message sent successfully.")
 
     except Exception as e:
         logging.error(f"An error occurred: {e}")
 
     finally:
         # Disconnect from the SMPP gateway
-        if client.is_connected():
-            client.disconnect()
-            logging.info("Disconnected from the SMPP gateway.")
+        client.disconnect()
+        logging.info("Disconnected from the SMPP gateway.")
 
 
 if __name__ == "__main__":
