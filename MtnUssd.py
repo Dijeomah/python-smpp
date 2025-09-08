@@ -53,7 +53,7 @@ class MtnUssd(SmppConfig):
                 if success:
                     self._logger.info("SMPP client started successfully")
                 else:
-                    raise RuntimeError("SMPP client failed to connect")
+                    self._logger.warning("SMPP client connection failed, but reconnection will be attempted automatically")
             else:
                 raise RuntimeError("SMPP client instance is not initialized")
         except Exception as e:
@@ -82,6 +82,8 @@ class MtnUssd(SmppConfig):
             # Make sure the client knows to stop as well
             if self.client_instance:
                 self.client_instance._should_run = False
+            self.stop_client()
+            sys.exit(0)
 
         # Handle SIGINT (Ctrl+C) and SIGTERM
         signal.signal(signal.SIGINT, signal_handler)
@@ -96,76 +98,30 @@ class MtnUssd(SmppConfig):
             self._logger.info("MTN USSD service is running. Press Ctrl+C to stop.")
             print("MTN USSD service is running. Press Ctrl+C to stop.")
 
-            # Main loop - improved logic to prevent rapid reconnection cycles
-            connection_attempts = 0
-            max_connection_attempts = 5
-            last_check_time = time.time()
-            check_interval = 10  # Check connection every 10 seconds instead of every second
+            # Main loop - let the client handle its own reconnections
+            # We just need to keep the main thread alive and check periodically
+            check_interval = 30  # Check every 30 seconds
+            last_status_log = time.time()
+            status_log_interval = 300  # Log status every 5 minutes
 
             while self.retry:
                 try:
-                    # Check if we should still be running (this is critical for exit)
+                    # Check if we should still be running
                     if not self.retry:
                         break
 
                     current_time = time.time()
 
-                    # Only check connection status periodically to reduce CPU usage
-                    if current_time - last_check_time >= check_interval:
-                        last_check_time = current_time
+                    # Log status periodically
+                    if current_time - last_status_log >= status_log_interval:
+                        if self.client_instance:
+                            status = "Connected" if self.client_instance.is_connected() else "Disconnected"
+                            session_state = self.client_instance.get_session_state().value if hasattr(self.client_instance.get_session_state(), 'value') else str(self.client_instance.get_session_state())
+                            self._logger.info(f"Service status: {status}, Session state: {session_state}")
+                        last_status_log = current_time
 
-                        # Check if client is still connected
-                        if self.client_instance and not self.client_instance.is_connected():
-                            self._logger.warning("SMPP client disconnected.")
-
-                            # Only try to reconnect if the server is reachable
-                            if self._can_connect_to_server():
-                                connection_attempts += 1
-                                self._logger.info(f"Server is reachable. Reconnection attempt #{connection_attempts}.")
-
-                                # Exponential backoff for reconnection attempts
-                                backoff_time = min(2 ** connection_attempts, 60)  # Max 60 seconds
-                                self._logger.info(f"Waiting {backoff_time} seconds before reconnection attempt...")
-
-                                # Wait with periodic checks for shutdown signal
-                                for _ in range(int(backoff_time)):
-                                    if not self.retry:
-                                        break
-                                    time.sleep(1.0)
-
-                                # Check if we should still be running after waiting
-                                if not self.retry:
-                                    break
-
-                                try:
-                                    success = self.client_instance.connect_gateway()
-                                    if success:
-                                        connection_attempts = 0  # Reset on successful connection
-                                        self._logger.info("Reconnection successful")
-                                    else:
-                                        self._logger.error(f"Reconnection attempt {connection_attempts} failed")
-                                        if connection_attempts >= max_connection_attempts:
-                                            self._logger.error("Maximum reconnection attempts reached. Exiting.")
-                                            self.retry = False
-                                except Exception as reconnect_error:
-                                    self._logger.error(f"Reconnection failed: {reconnect_error}")
-                                    if connection_attempts >= max_connection_attempts:
-                                        self._logger.error("Maximum reconnection attempts reached. Exiting.")
-                                        self.retry = False
-                            else:
-                                self._logger.warning(f"Server {self.server_ip}:{self.server_port} is not reachable. Waiting 30 seconds.")
-
-                                # Wait 30 seconds with periodic checks for shutdown
-                                for _ in range(30):
-                                    if not self.retry:
-                                        break
-                                    time.sleep(1.0)
-                        else:
-                            # Connection is good, reset connection attempts counter
-                            connection_attempts = 0
-
-                    # Sleep for a reasonable interval before next check
-                    time.sleep(1.0)
+                    # Sleep for the check interval
+                    time.sleep(check_interval)
 
                 except KeyboardInterrupt:
                     self._logger.info("Keyboard interrupt received, shutting down...")

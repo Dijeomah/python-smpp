@@ -6,6 +6,7 @@ import time
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+from enum import Enum
 import smpplib.client
 import smpplib.consts
 import smpplib.gsm
@@ -13,6 +14,17 @@ import smpplib.command
 import smpplib.pdu
 from SmppConfig import SmppConfig
 from SendSubmitSm import SendSubmitSm
+
+
+class SessionState(Enum):
+    """SMPP Session states"""
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    BOUND_TX = "BOUND_TX"
+    BOUND_RX = "BOUND_RX"
+    BOUND_TRX = "BOUND_TRX"
+    UNBOUND = "UNBOUND"
+
 
 def patch_parse_optional_params():
     """Patch PDU classes to handle unknown optional parameters gracefully."""
@@ -98,6 +110,51 @@ except Exception as e:
     logging.warning(f"Failed to patch optional parameter parsing: {e}")
 
 
+class ReconnectionThread(threading.Thread):
+    """Thread to handle reconnection logic"""
+
+    def __init__(self, smpp_client, delay_ms: int):
+        super().__init__(daemon=True)
+        self.smpp_client = smpp_client
+        self.delay_ms = delay_ms
+        self.logger = logging.getLogger(__name__)
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        """Stop the reconnection thread"""
+        self._stop_event.set()
+
+    def run(self):
+        """Run reconnection logic"""
+        self.logger.info(f"Schedule reconnect after {self.delay_ms} millis")
+
+        # Wait for delay or stop signal
+        if self._stop_event.wait(self.delay_ms / 1000.0):
+            return  # Stop event was set
+
+        attempt = 0
+        while (not self._stop_event.is_set() and
+               self.smpp_client._should_run and
+               (self.smpp_client.conn is None or not self.smpp_client.is_connected())):
+            try:
+                attempt += 1
+                self.logger.info(f"Reconnecting attempt #{attempt}...")
+
+                # Create new session and connect
+                success = self.smpp_client.connect_gateway()
+                if success:
+                    self.logger.info("Reconnection successful")
+                    break
+
+            except Exception as e:
+                self.logger.error(f"Failed opening connection and bind to "
+                                  f"{self.smpp_client.server_ip}:{self.smpp_client.server_port}: {e}")
+
+                # Wait before next attempt or stop if requested
+                if self._stop_event.wait(5.0):  # 5 second delay between attempts
+                    break
+
+
 class SmppClient(SmppConfig):
     """SMPP Client implementation using smpplib"""
 
@@ -118,10 +175,19 @@ class SmppClient(SmppConfig):
         self._last_heartbeat = time.time()
         self._lock = threading.Lock()
         self._enquire_link_thread = None
+        self._reconnect_thread = None
+        self.reconnect_interval = 5000  # 5 seconds
+        self.session_state = SessionState.CLOSED
+        self.enquire_link_timer = 25000  # 25 seconds
 
     def connect_gateway(self):
         """Connect to SMPP gateway"""
         with self._lock:
+            # Stop any existing reconnection thread
+            if self._reconnect_thread:
+                self._reconnect_thread.stop()
+                self._reconnect_thread = None
+
             # Close existing connection if any
             if self.conn:
                 try:
@@ -162,7 +228,8 @@ class SmppClient(SmppConfig):
 
                 self._connected = True
                 self._should_run = True
-                self._last_heartbeat = time.time()  # Reset heartbeat on successful connection
+                self._last_heartbeat = time.time()
+                self.session_state = SessionState.BOUND_TRX
 
                 # Start the listen thread
                 self._listen_thread = threading.Thread(target=self._listen)
@@ -176,10 +243,14 @@ class SmppClient(SmppConfig):
 
                 self.logger.info("SMPP connection established successfully")
                 return True
+
             except Exception as e:
                 self._connected = False
+                self.session_state = SessionState.CLOSED
                 self.logger.error(f"Connection failed: {e}")
-                raise
+                # Schedule reconnection
+                self._reconnect_after(self.reconnect_interval)
+                return False
 
     def _listen(self):
         """Listen for incoming messages with proper error handling for smpplib 2.2.4"""
@@ -189,17 +260,16 @@ class SmppClient(SmppConfig):
                     # Check if socket is still valid
                     if not hasattr(self.conn, 'socket') or self.conn.socket is None:
                         self.logger.warning("Socket is None, marking as disconnected")
-                        self._connected = False
+                        self._handle_disconnection()
                         break
 
                     # Check connection state
                     if hasattr(self.conn, 'state') and self.conn.state != 'BOUND_TRX':
                         self.logger.warning(f"Connection state is {self.conn.state}, expected BOUND_TRX")
-                        self._connected = False
+                        self._handle_disconnection()
                         break
 
-                    # For smpplib 2.2.4, use the listen method without timeout
-                    # We'll implement our own timeout mechanism
+                    # Set timeout and listen
                     original_timeout = None
                     if hasattr(self.conn.socket, 'gettimeout'):
                         original_timeout = self.conn.socket.gettimeout()
@@ -213,22 +283,19 @@ class SmppClient(SmppConfig):
 
                     except socket.timeout:
                         # Timeout is normal, just continue the loop
-                        # Update heartbeat to show we're still trying
-                        self._last_heartbeat = time.time()
                         continue
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as e:
                         self.logger.warning(f"Connection lost in listen loop: {e}")
-                        self._connected = False
+                        self._handle_disconnection()
                         break
                     except Exception as e:
                         # Check if we're intentionally stopping
                         if not self._should_run:
                             break
-                        # Log other errors but don't necessarily disconnect
                         self.logger.warning(f"Error in listen loop: {e}")
                         # Only mark as disconnected if it's a serious connection error
                         if "not connected" in str(e).lower() or "socket" in str(e).lower():
-                            self._connected = False
+                            self._handle_disconnection()
                             break
                     finally:
                         # Restore original timeout if it existed
@@ -239,28 +306,25 @@ class SmppClient(SmppConfig):
                                 pass
 
                 except Exception as e:
-                    # Check if we're intentionally stopping
                     if not self._should_run:
                         break
-                    # Actual error
-                    if self._should_run and self._connected:
-                        self.logger.warning(f"Outer error in listen loop: {e}")
-                        self._connected = False
-                        break
+                    self.logger.warning(f"Outer error in listen loop: {e}")
+                    self._handle_disconnection()
+                    break
 
                 # Small sleep to prevent tight loop
                 time.sleep(0.1)
 
         except Exception as e:
-            if self._should_run:  # Only log if we're supposed to be running
+            if self._should_run:
                 self.logger.error(f"Fatal error in listen thread: {e}")
-                self._connected = False
+                self._handle_disconnection()
 
     def _enquire_link_loop(self):
         """Send enquire_link messages periodically to keep connection alive"""
         while self._should_run and self._connected:
             try:
-                time.sleep(30)  # Send every 30 seconds
+                time.sleep(self.enquire_link_timer / 1000.0)  # Convert ms to seconds
 
                 if not self._should_run or not self._connected:
                     break
@@ -273,20 +337,47 @@ class SmppClient(SmppConfig):
                         self._last_heartbeat = time.time()
                     except Exception as e:
                         self.logger.warning(f"Failed to send enquire_link: {e}")
-                        self._connected = False
+                        self._handle_disconnection()
                         break
 
             except Exception as e:
                 if self._should_run:
                     self.logger.error(f"Error in enquire_link loop: {e}")
-                    self._connected = False
+                    self._handle_disconnection()
                 break
+
+    def _handle_disconnection(self):
+        """Handle disconnection and schedule reconnection"""
+        with self._lock:
+            if self._connected:  # Only process if we think we're connected
+                self._connected = False
+                self.session_state = SessionState.CLOSED
+                self.logger.warning("Connection lost, scheduling reconnection")
+                self._reconnect_after(self.reconnect_interval)
+
+    def _reconnect_after(self, time_in_millis: int):
+        """Schedule reconnection after specified time"""
+        if not self._should_run:
+            return
+
+        # Stop any existing reconnection thread
+        if self._reconnect_thread:
+            self._reconnect_thread.stop()
+
+        self._reconnect_thread = ReconnectionThread(self, time_in_millis)
+        self._reconnect_thread.start()
 
     def disconnect(self):
         """Disconnect from SMPP gateway"""
         with self._lock:
             self._should_run = False
             self._connected = False
+            self.session_state = SessionState.CLOSED
+
+            # Stop reconnection thread if running
+            if self._reconnect_thread:
+                self._reconnect_thread.stop()
+                self._reconnect_thread = None
 
             if self.conn:
                 try:
@@ -300,18 +391,15 @@ class SmppClient(SmppConfig):
                 finally:
                     self.conn = None
 
-            # Wait for listen thread to finish with a timeout
+            # Wait for threads to finish
             if self._listen_thread and self._listen_thread.is_alive():
-                self._listen_thread.join(timeout=5)  # Wait up to 5 seconds
+                self._listen_thread.join(timeout=5)
 
-            # Wait for enquire_link thread to finish
             if self._enquire_link_thread and self._enquire_link_thread.is_alive():
                 self._enquire_link_thread.join(timeout=2)
 
             if self.executor_service:
-                # Give tasks a moment to finish, then force shutdown
                 self.executor_service.shutdown(wait=False)
-                # Wait a moment for tasks to finish
                 time.sleep(0.1)
 
     def is_connected(self) -> bool:
@@ -331,6 +419,10 @@ class SmppClient(SmppConfig):
 
             return True
 
+    def get_session_state(self):
+        """Get current session state"""
+        return self.session_state
+
     def handle_message(self, pdu):
         """Handle incoming messages"""
         try:
@@ -339,15 +431,20 @@ class SmppClient(SmppConfig):
                 if isinstance(short_message, bytes):
                     short_message = short_message.decode('utf-8', errors='ignore')
 
-                # Log additional info for debugging
-                self.logger.debug(f"Received PDU: {pdu}")
-                if hasattr(pdu, 'optional_parameters') and pdu.optional_parameters:
-                    self.logger.debug(f"Optional parameters: {pdu.optional_parameters}")
+                # Check if it's not a delivery receipt (simplified check)
+                if not self._is_delivery_receipt(pdu):
+                    dest_address = getattr(pdu, 'destination_addr', '').decode('utf-8') if hasattr(pdu, 'destination_addr') else ''
 
-                self.logger.info(f"Received deliver_sm: {short_message}")
+                    print(f"RECEIVING{short_message} CONNECT:::{self.conn}: {dest_address}")
 
-                task = SendSubmitSm(self, pdu)
-                self.executor_service.submit(task.run)
+                    self.logger.info(f"Received deliver_sm: {short_message}")
+
+                    if self.is_connected():
+                        task = SendSubmitSm(self, pdu)
+                        self.executor_service.submit(task.run)
+                    else:
+                        # Connection lost, trigger reconnection
+                        self._handle_disconnection()
 
             elif hasattr(pdu, 'command') and pdu.command == 'enquire_link':
                 # Respond to enquire_link automatically
@@ -359,6 +456,13 @@ class SmppClient(SmppConfig):
 
         except Exception as e:
             self.logger.error(f"Error handling message: {e}")
+
+    def _is_delivery_receipt(self, pdu) -> bool:
+        """Check if message is a delivery receipt"""
+        # Check ESM class for delivery receipt flag (0x04)
+        if hasattr(pdu, 'esm_class'):
+            return (pdu.esm_class & 0x04) != 0
+        return False
 
     def submit_short_message(self, **kwargs):
         """Submit a short message."""
@@ -374,5 +478,5 @@ class SmppClient(SmppConfig):
                 self.logger.error(f"Error submitting message: {e}")
                 # Mark as disconnected if it's a connection error
                 if "Connection reset" in str(e) or "not connected" in str(e).lower():
-                    self._connected = False
+                    self._handle_disconnection()
                 raise
